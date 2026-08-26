@@ -73,6 +73,7 @@ MEM0_COUNT="?"
 if command -v python3 >/dev/null 2>&1; then
   MEM0_COUNT=$(python3 -c "
 import json, os, urllib.request, urllib.error
+API_URL = os.environ.get('MEM0_BASE_URL', 'https://api.mem0.ai')
 api_key = os.environ.get('MEM0_API_KEY', '')
 user_id = os.environ.get('MEM0_RESOLVED_USER_ID', 'default')
 app_id = os.environ.get('MEM0_PROJECT_ID', '')
@@ -81,7 +82,7 @@ global_search = os.environ.get('MEM0_GLOBAL_SEARCH', 'false') == 'true'
 def get_count(filters):
     body = json.dumps({'filters': filters}).encode()
     req = urllib.request.Request(
-        'https://api.mem0.ai/v3/memories/?page=1&page_size=1',
+        API_URL + '/v3/memories/?page=1&page_size=1',
         headers={'Authorization': f'Token {api_key}', 'Content-Type': 'application/json'},
         data=body, method='POST',
     )

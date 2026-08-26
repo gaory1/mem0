@@ -3,11 +3,12 @@ FROM python:3.12
 WORKDIR /app
 
 # Install Poetry
-RUN curl -sSL https://install.python-poetry.org | python3 -
+# RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
 
 # Copy requirements first for better caching
 COPY server/requirements.txt .
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 RUN pip install -r requirements.txt
 
 # Install mem0 in editable mode using Poetry

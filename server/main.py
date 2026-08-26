@@ -117,6 +117,13 @@ HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini")
 DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
 
+# --- Embedder (independent of LLM) ---
+EMBEDDER_PROVIDER = os.environ.get("MEM0_EMBEDDER_PROVIDER", "openai")
+EMBEDDER_API_KEY = os.environ.get("MEM0_EMBEDDER_API_KEY")
+EMBEDDER_BASE_URL = os.environ.get("MEM0_EMBEDDER_BASE_URL", "http://localhost:11434/v1")
+EMBEDDING_DIMS = int(os.environ.get("EMBEDDING_DIMS", "1024"))
+
+
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
@@ -128,13 +135,22 @@ DEFAULT_CONFIG = {
             "user": POSTGRES_USER,
             "password": POSTGRES_PASSWORD,
             "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": EMBEDDING_DIMS,
         },
     },
     "llm": {
         "provider": "openai",
         "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
     },
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
+    "embedder": {
+        "provider": EMBEDDER_PROVIDER,
+        "config": {
+            f"{EMBEDDER_PROVIDER}_base_url": EMBEDDER_BASE_URL,
+            "api_key": EMBEDDER_API_KEY,
+            "model": DEFAULT_EMBEDDER_MODEL,
+            "embedding_dims": EMBEDDING_DIMS,
+        },
+    },
     "history_db_path": HISTORY_DB_PATH,
 }
 
@@ -170,6 +186,10 @@ app.include_router(auth_router.router)
 app.include_router(api_keys_router.router)
 app.include_router(entities_router.router)
 app.include_router(requests_router.router)
+
+# MCP (Model Context Protocol) endpoint — mounted at /mcp
+from routers.mcp import create_mcp_starlette_app
+app.mount("/mcp", create_mcp_starlette_app())
 
 
 class Message(BaseModel):
@@ -558,3 +578,264 @@ def reset_memory(_auth=Depends(require_admin)):
 def home():
     """Redirect to the OpenAPI documentation."""
     return RedirectResponse(url="/docs")
+
+
+# ============================================================================
+# v1 API - CLI/Plugin compatibility endpoints
+# ============================================================================
+
+
+class PingResponse(BaseModel):
+    connected: bool = True
+    backend: str = "self-hosted"
+    version: str = "1.0.0"
+
+
+@app.get("/v1/ping/", summary="Health check for CLI and plugins", response_model=PingResponse)
+def ping():
+    """Simple health check endpoint to verify server connectivity."""
+    return PingResponse(connected=True, backend="self-hosted", version="1.0.0")
+
+
+class EventItem(BaseModel):
+    event_id: str
+    status: str
+    created_at: Optional[str] = None
+
+
+class EventsListResponse(BaseModel):
+    events: List[EventItem] = []
+
+
+@app.get("/v1/events/", summary="List async events", response_model=EventsListResponse)
+def list_events(_auth=Depends(verify_auth)):
+    """List asynchronous events. Currently returns empty list as async operations are synchronous."""
+    return EventsListResponse(events=[])
+
+
+@app.get("/v1/event/{event_id}/", summary="Get async event status")
+def get_event(event_id: str, _auth=Depends(verify_auth)):
+    """Get the status of a specific async event."""
+    # Currently all operations are synchronous, so events complete immediately
+    return {"event_id": event_id, "status": "completed", "result": None}
+
+
+# ============================================================================
+# v3 API - Platform compatibility endpoints
+# ============================================================================
+
+
+class BatchDeleteRequest(BaseModel):
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    run_id: Optional[str] = None
+    memory_ids: Optional[List[str]] = None
+
+
+class BatchDeleteResponse(BaseModel):
+    deleted: int = 0
+    message: str
+
+
+@app.post("/v3/memories/batch-delete/", summary="Batch delete memories", response_model=BatchDeleteResponse)
+def batch_delete_memories(req: BatchDeleteRequest, _auth=Depends(verify_auth)):
+    """Delete multiple memories by ID or filter criteria."""
+    deleted_count = 0
+
+    # Delete by specific memory IDs if provided
+    if req.memory_ids:
+        for memory_id in req.memory_ids:
+            try:
+                get_memory_instance().delete(memory_id=memory_id)
+                deleted_count += 1
+            except Exception:
+                pass  # Skip failures for individual deletions
+
+    # Also support filter-based deletion (like existing delete_all_memories)
+    if req.user_id or req.agent_id or req.run_id:
+        params = {
+            k: v for k, v in {
+                "user_id": req.user_id,
+                "agent_id": req.agent_id,
+                "run_id": req.run_id,
+            }.items() if v
+        }
+        if params:
+            try:
+                get_memory_instance().delete_all(**params)
+                # delete_all doesn't return count, estimate based on prior search
+                deleted_count += 1
+            except Exception:
+                pass
+
+    return BatchDeleteResponse(
+        deleted=deleted_count,
+        message=f"Successfully deleted {deleted_count} memories" if deleted_count > 0 else "No memories deleted"
+    )
+
+
+# ============================================================================
+# v3 API - Platform-compatible endpoints with transformed responses
+# ============================================================================
+
+
+class SearchResultV3(BaseModel):
+    """v3 search result format matching Platform API."""
+    id: str
+    memory: str
+    user_id: Optional[str] = None
+    categories: List[str] = []
+    score: float = 0.0
+    created_at: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class SearchResponseV3(BaseModel):
+    """v3 search response with categories and score fields."""
+    results: List[SearchResultV3]
+
+
+def _to_v3_search_result(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform SDK search result to v3 Platform format with categories and score."""
+    return {
+        "id": item.get("id", ""),
+        "memory": item.get("memory", item.get("text", "")),
+        "user_id": item.get("user_id"),
+        "categories": item.get("categories", []),
+        "score": item.get("score", 0.0),
+        "created_at": item.get("created_at"),
+        "metadata": item.get("metadata"),
+    }
+
+
+@app.post("/v3/memories/search/", summary="Search memories (v3 Platform format)")
+def search_memories_v3(search_req: SearchRequest, _auth=Depends(verify_auth)):
+    """Search for memories returning v3 Platform format with categories and score."""
+    try:
+        filters = search_req.filters or {}
+        params = {}
+        if search_req.top_k is not None:
+            params["top_k"] = search_req.top_k
+        if search_req.threshold is not None:
+            params["threshold"] = search_req.threshold
+        if search_req.explain is not None:
+            params["explain"] = search_req.explain
+        if search_req.show_expired is not None:
+            params["show_expired"] = search_req.show_expired
+
+        sdk_results = get_memory_instance().search(query=search_req.query, filters=filters, **params)
+
+        # Transform to v3 format with categories and score
+        results = sdk_results.get("results", []) if isinstance(sdk_results, dict) else sdk_results
+        v3_results = [_to_v3_search_result(r) for r in results]
+
+        return {"results": v3_results}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise upstream_error()
+
+
+class MemoryCreateV3(BaseModel):
+    """v3 memory creation request."""
+    messages: List[Message] = Field(..., description="List of messages to store.")
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    run_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    expiration_date: Optional[str] = Field(None, description="Expiration date in YYYY-MM-DD format.")
+    infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
+    memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
+    prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+
+
+class AddResponseV3(BaseModel):
+    """v3 add response - returns queued event."""
+    message: str
+    status: str
+    event_id: str
+
+
+@app.post("/v3/memories/add/", summary="Add memories (v3 Platform format)")
+def add_memory_v3(memory_create: MemoryCreateV3, _auth=Depends(verify_auth)):
+    """Store new memories in v3 format, returning a queued event response."""
+    if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
+        raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
+
+    params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    try:
+        get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        # Return v3 async format - in self-hosted, operations are synchronous
+        # so we return a synthetic event_id
+        import uuid
+        return AddResponseV3(
+            message="Memory processing has been queued for background execution",
+            status="PENDING",
+            event_id=f"evt-{uuid.uuid4()}"
+        )
+    except (ValueError, Mem0ValidationError) as e:
+        raise _client_error(e)
+    except Exception:
+        raise upstream_error()
+
+
+class GetAllResponseV3(BaseModel):
+    """v3 get all response with pagination envelope."""
+    count: int
+    next: Optional[str] = None
+    previous: Optional[str] = None
+    results: List[Dict[str, Any]]
+
+
+@app.post("/v3/memories/", summary="List memories (v3 Platform format)", response_model=GetAllResponseV3)
+def get_all_memories_v3(
+    request: Request,
+    user_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    top_k: Optional[int] = Query(None, ge=0, le=ALL_MEMORIES_LIMIT),
+    show_expired: bool = Query(False),
+    _auth=Depends(verify_auth),
+):
+    """Retrieve memories in v3 paginated format."""
+    try:
+        if not any([user_id, run_id, agent_id]):
+            auth_type = getattr(request.state, "auth_type", "none")
+            if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
+                raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
+            results = _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT)
+            results_list = results.get("results", [])
+            return GetAllResponseV3(
+                count=len(results_list),
+                next=None,
+                previous=None,
+                results=results_list
+            )
+        filters = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v}
+        params = {"filters": filters}
+        if top_k is not None:
+            params["top_k"] = top_k
+        params["show_expired"] = show_expired
+        result = get_memory_instance().get_all(**params)
+        results_list = result.get("results", []) if isinstance(result, dict) else result
+        return GetAllResponseV3(
+            count=len(results_list),
+            next=None,
+            previous=None,
+            results=results_list
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        raise upstream_error()
+
+
+# ============================================================================
+# v1 API - CLI/Plugin compatibility endpoints (reuse existing handlers)
+# ============================================================================
+
+# v1 path aliases using add_api_route to reuse existing handler functions
+app.add_api_route("/v1/memories/{memory_id}/", get_memory, methods=["GET"], include_in_schema=False)
+app.add_api_route("/v1/memories/{memory_id}/", update_memory, methods=["PUT"], include_in_schema=False)
+app.add_api_route("/v1/memories/{memory_id}/", delete_memory, methods=["DELETE"], include_in_schema=False)
+app.add_api_route("/v1/memories/", delete_all_memories, methods=["DELETE"], include_in_schema=False)

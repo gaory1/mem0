@@ -6,7 +6,7 @@ services:
       context: ..
       dockerfile: server/dev.Dockerfile
     ports:
-      - "8888:8000"
+      - "${API_PORT}:8000"
     env_file:
       - .env
     networks:
@@ -23,7 +23,7 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=
-      - DASHBOARD_URL=http://localhost:3000
+      - DASHBOARD_URL=${DASHBOARD_URL}
       - APP_DB_NAME=mem0_app
       - JWT_SECRET=${JWT_SECRET}
       - AUTH_DISABLED=${AUTH_DISABLED:-false}
@@ -52,13 +52,17 @@ services:
   mem0-dashboard:
     build: ./dashboard
     ports:
-      - "3000:3000"
+      - "${DASHBOARD_PORT}:3000"
     networks:
       - mem0_network
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8888
+      - NEXT_PUBLIC_API_URL=http://${PUBLIC_HOST}:${API_PORT}
       - API_INTERNAL_URL=http://mem0:8000
       - NEXT_PUBLIC_INSTANCE_NAME=Mem0
+      # ponytail: http:// origin so the refresh-token cookie is emitted without
+      # Secure and actually stored by the browser over plain HTTP. Without this,
+      # NODE_ENV=production forces Secure and login silently fails.
+      - DASHBOARD_URL=${DASHBOARD_URL}
     depends_on:
       mem0:
         condition: service_started

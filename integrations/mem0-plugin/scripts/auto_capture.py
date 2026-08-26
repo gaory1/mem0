@@ -40,7 +40,7 @@ if os.environ.get("MEM0_DEBUG"):
     except OSError:
         pass
 
-API_URL = "https://api.mem0.ai"
+API_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
 TAIL_LINES = 200
 MAX_CONTENT_CHARS = 8000
 MIN_CONTENT_CHARS = 100

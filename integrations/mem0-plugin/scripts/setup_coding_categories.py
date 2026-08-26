@@ -179,6 +179,9 @@ def main() -> int:
     if not api_key:
         print("ERROR: MEM0_API_KEY is not set. Export it or configure it via plugin userConfig.", file=sys.stderr)
         return 1
+    if os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai") != "https://api.mem0.ai":
+        print("Coding categories are a Mem0 Platform feature with no local-server equivalent; skipping.", file=sys.stderr)
+        return 0
     os.environ["MEM0_API_KEY"] = api_key
 
     try:

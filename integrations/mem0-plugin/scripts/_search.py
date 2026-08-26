@@ -11,7 +11,7 @@ import os
 import sys
 import urllib.request
 
-SEARCH_URL = "https://api.mem0.ai/v3/memories/search/"
+SEARCH_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai") + "/v3/memories/search/"
 SEARCH_TIMEOUT = 5
 
 

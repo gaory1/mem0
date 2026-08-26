@@ -17,6 +17,7 @@ import pytest
 
 pytest.importorskip("fastapi", reason="fastapi not installed")
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -298,6 +299,178 @@ class TestAuthEnabled:
     def test_configure_with_key(self):
         resp = self._authed("POST", "/configure", json={"version": "v1.1"})
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Authorization: Token <api_key> scheme (CLI compatibility)
+# ---------------------------------------------------------------------------
+
+class TestTokenAuthScheme:
+    """`Authorization: Token <api_key>` must be accepted alongside Bearer JWT and X-API-Key.
+
+    The official CLI (@mem0/cli, mem0-cli) hardcodes this header. Without it, every
+    CLI call returns 401. The scheme is case-insensitive per RFC 7235 §2.1.
+    """
+
+    VALID_KEY = "m0sk_validkey1234567890abcdef"
+    ADMIN_KEY = "test-admin-key-1234567890"
+    VALID_JWT = "valid.jwt.token"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, _mock_memory):
+        import auth
+
+        self.app = _load_app({
+            "ADMIN_API_KEY": self.ADMIN_KEY,
+            "AUTH_DISABLED": "false",
+            "JWT_SECRET": "test-jwt-secret-for-token-auth-tests",
+        })
+        self.client = TestClient(self.app)
+        self.mock = _mock_memory
+
+        # `importlib.reload(server.main)` doesn't propagate env changes to auth's
+        # module-level constants — they were captured at first import. Patch them
+        # in-place so verify_auth sees our test values.
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__enter__.return_value = MagicMock()
+        mock_session_ctx.__exit__.return_value = None
+
+        fake_user = MagicMock()
+        fake_user.role = "user"
+        fake_user.id = "fake-user-id"
+
+        def fake_resolve_api_key(key, db):
+            if key == self.VALID_KEY:
+                return fake_user
+            raise HTTPException(status_code=401, detail="Invalid API key.")
+
+        def fake_resolve_jwt(token, db):
+            if token == self.VALID_JWT:
+                return fake_user
+            raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+        self._patches = [
+            patch.object(auth, "ADMIN_API_KEY", self.ADMIN_KEY),
+            patch.object(auth, "AUTH_DISABLED", False),
+            patch.object(auth, "JWT_SECRET", "test-jwt-secret-for-token-auth-tests"),
+            patch("auth.SessionLocal", return_value=mock_session_ctx),
+            patch("auth._resolve_user_from_api_key", side_effect=fake_resolve_api_key),
+            patch("auth._resolve_user_from_jwt", side_effect=fake_resolve_jwt),
+        ]
+        for p in self._patches:
+            p.start()
+        try:
+            yield
+        finally:
+            for p in self._patches:
+                p.stop()
+
+    # --- Acceptance ---
+
+    def test_token_with_valid_key_returns_200(self):
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": f"Token {self.VALID_KEY}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "mem-1"
+
+    def test_token_with_wrong_key_returns_401_with_api_key_detail(self):
+        """Regression guard: invalid Token must take the API-key path, not the JWT decode path."""
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": "Token wrong-key"},
+        )
+        assert resp.status_code == 401
+        detail = resp.json()["detail"]
+        assert "API key" in detail
+        assert "expired" not in detail.lower()
+
+    def test_token_scheme_lowercase(self):
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": f"token {self.VALID_KEY}"},
+        )
+        assert resp.status_code == 200
+
+    def test_token_scheme_uppercase(self):
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": f"TOKEN {self.VALID_KEY}"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.parametrize(
+        "scheme,headers_factory",
+        [
+            ("bearer-jwt", lambda c: {"Authorization": f"Bearer {c.VALID_JWT}"}),
+            ("token-api-key", lambda c: {"Authorization": f"Token {c.VALID_KEY}"}),
+            ("x-api-key-admin", lambda c: {"X-API-Key": c.ADMIN_KEY}),
+        ],
+    )
+    def test_all_three_schemes_route_correctly(self, scheme, headers_factory):
+        """Regression: each accepted scheme still resolves to the right backend."""
+        resp = self.client.get("/memories/mem-1", headers=headers_factory(self))
+        assert resp.status_code == 200, f"{scheme} scheme must succeed"
+
+    # --- Rejection ---
+
+    def test_token_with_empty_credentials_returns_401(self):
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": "Token "},
+        )
+        assert resp.status_code == 401
+
+    def test_token_with_extra_whitespace_around_key_returns_401(self):
+        """`Authorization: Token  <key> ` has spaces around the credentials.
+        Strict parsing: leading/trailing whitespace invalidates the credentials
+        so the API-key hash check fails downstream with "Invalid API key"."""
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": f"Token  {self.VALID_KEY} "},
+        )
+        assert resp.status_code == 401
+        assert "API key" in resp.json()["detail"]
+
+    def test_no_auth_header_returns_401_with_www_authenticate_bearer(self):
+        resp = self.client.get("/memories/mem-1")
+        assert resp.status_code == 401
+        assert resp.headers.get("www-authenticate") == "Bearer"
+
+    def test_unknown_scheme_returns_401_with_www_authenticate_bearer(self):
+        resp = self.client.get(
+            "/memories/mem-1",
+            headers={"Authorization": "Basic Zm9vOmJhcg=="},
+        )
+        assert resp.status_code == 401
+        assert resp.headers.get("www-authenticate") == "Bearer"
+
+    def test_auth_disabled_accepts_any_token(self):
+        """AUTH_DISABLED=true short-circuits verify_auth before scheme parsing,
+        so the new Token scheme must not penalize callers in dev mode."""
+        import auth as auth_module
+
+        with patch.object(auth_module, "ADMIN_API_KEY", ""), \
+             patch.object(auth_module, "AUTH_DISABLED", True), \
+             patch.object(auth_module, "JWT_SECRET", "test-jwt-secret-for-token-auth-tests"):
+            client = TestClient(self.app)
+            resp = client.get(
+                "/memories/mem-1",
+                headers={"Authorization": "Token literally-anything"},
+            )
+            assert resp.status_code == 200
+
+    def test_mcp_route_with_token_auth_passes_authentication(self):
+        """POST /mcp with Token auth must get past AuthMiddleware.
+        The request may fail downstream (MCP protocol errors are fine) but it
+        must not return 401, which would mean the middleware rejected us."""
+        resp = self.client.post(
+            "/mcp",
+            headers={"Authorization": f"Token {self.VALID_KEY}"},
+            json={},
+        )
+        assert resp.status_code != 401, f"MCP rejected valid Token auth: {resp.text}"
 
 
 # ---------------------------------------------------------------------------

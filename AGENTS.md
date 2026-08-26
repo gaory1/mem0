@@ -173,3 +173,4 @@ Beyond the CLA and the accepted-issue gate, the [Contribution Conduct](CODE_OF_C
 | Contribution gates | [Two gates decide whether your pull request stays open](#two-gates-decide-whether-your-pull-request-stays-open) |
 | Trust list (vouch) | [`.github/VOUCHED.td`](.github/VOUCHED.td) |
 | CI/CD, gates, rulesets | [`.github/AGENTS.md`](.github/AGENTS.md) |
+| Self hosted | [`SELF_HOSTED.md`](SELF_HOSTED.md) |

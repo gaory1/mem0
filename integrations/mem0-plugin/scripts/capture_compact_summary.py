@@ -45,7 +45,7 @@ if os.environ.get("MEM0_DEBUG"):
     except OSError:
         pass
 
-API_URL = "https://api.mem0.ai"
+API_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
 MAX_TAIL_LINES = 2000
 MAX_SUMMARY_CHARS = 50000
 # Compact summaries describe a single session's state -- stale after a quarter.

@@ -101,7 +101,34 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
 
-bearer_scheme = HTTPBearer(auto_error=False)
+class _AuthSchemeCredentials:
+    """scheme + token 的轻量归一化对象。`scheme` 是 lowercase (`bearer` 或 `token`)。"""
+
+    __slots__ = ("scheme", "credentials")
+
+    def __init__(self, scheme: str, credentials: str) -> None:
+        self.scheme = scheme
+        self.credentials = credentials
+
+
+class HTTPAuthToken(HTTPBearer):
+    """接受 `Authorization: Bearer <jwt>` 和 `Authorization: Token <api_key>`。
+    auto_error=False：解析失败返回 None，让 verify_auth 决定 401。"""
+
+    def __init__(self) -> None:
+        super().__init__(auto_error=False, bearerFormat=None, scheme_name="AuthToken")
+
+    async def __call__(self, request: Request) -> _AuthSchemeCredentials | None:
+        authorization = request.headers.get("Authorization")
+        if not authorization:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() not in {"bearer", "token"} or not token:
+            return None
+        return _AuthSchemeCredentials(scheme=scheme.lower(), credentials=token)
+
+
+auth_scheme = HTTPAuthToken()
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -143,7 +170,7 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
 
 async def verify_auth(
     request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    credentials: _AuthSchemeCredentials | None = Depends(auth_scheme),
     x_api_key: str | None = Depends(api_key_header),
 ) -> User | None:
     """Authenticate via JWT, X-API-Key, or legacy ADMIN_API_KEY. Returns User or None.
@@ -152,6 +179,10 @@ async def verify_auth(
     pooled connection is held for the lifetime of the (possibly long-running) request.
     """
     if credentials is not None:
+        if credentials.scheme == "token":
+            _mark_auth_type(request, "token_api_key")
+            with SessionLocal() as db:
+                return _resolve_user_from_api_key(credentials.credentials, db)
         _mark_auth_type(request, "bearer")
         with SessionLocal() as db:
             return _resolve_user_from_jwt(credentials.credentials, db)
@@ -170,7 +201,7 @@ async def verify_auth(
 
     raise HTTPException(
         status_code=401,
-        detail="Authentication required. Provide a Bearer token or X-API-Key header.",
+        detail="Authentication required. Provide a Bearer token, Token, or X-API-Key header.",
         headers={"WWW-Authenticate": "Bearer"},
     )
 

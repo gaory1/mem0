@@ -6,8 +6,11 @@ set -euo pipefail
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${HOME}/.mem0/plugin-data}"
 VENV_DIR="${DATA_DIR}/venv"
+VENV_PY="${VENV_DIR}/bin/python3"
 REQ_SRC="${PLUGIN_ROOT}/requirements.txt"
 REQ_STAMP="${DATA_DIR}/requirements.txt"
+MCP_JSON="${PLUGIN_ROOT}/.mcp.json"
+API_KEY="${MEM0_API_KEY:-}"
 
 mkdir -p "${DATA_DIR}"
 
@@ -30,6 +33,30 @@ if [ "${needs_install}" = "true" ]; then
     if "${VENV_DIR}/bin/pip" install --quiet -r "${REQ_SRC}" 2>/dev/null; then
       cp "${REQ_SRC}" "${REQ_STAMP}"
       rm -f "${DATA_DIR}/.install-failed"
+      # Patch .mcp.json to use the venv python and pass API key
+      if [ -f "${MCP_JSON}" ]; then
+        python3 - << 'PYEOF'
+import json, sys
+mcp_path = sys.argv[1]
+venv_py = sys.argv[2]
+api_key = sys.argv[3]
+
+with open(mcp_path) as f:
+    cfg = json.load(f)
+
+server = cfg.get("mcpServers", {}).get("mem0", {})
+server["command"] = venv_py
+
+env = server.get("env", {})
+if api_key and "MEM0_API_KEY" not in env:
+    env["MEM0_API_KEY"] = api_key
+server["env"] = env
+
+with open(mcp_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+        "${MCP_JSON}" "${VENV_PY}" "${API_KEY}"
+      fi
     else
       rm -f "${REQ_STAMP}"
       touch "${DATA_DIR}/.install-failed"

@@ -189,6 +189,10 @@ def main() -> None:
         log.debug("MEM0_API_KEY not set, skipping coding-categories setup")
         return
 
+    if os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai") != "https://api.mem0.ai":
+        log.debug("Local server mode — coding categories are a platform feature, skipping")
+        return
+
     key_fp = apikey_fingerprint(api_key)
     cat_fp = categories_fingerprint()
 

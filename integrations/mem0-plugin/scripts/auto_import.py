@@ -41,7 +41,7 @@ if os.environ.get("MEM0_DEBUG"):
     except OSError:
         pass
 
-API_URL = "https://api.mem0.ai"
+API_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
 MAX_FILE_SIZE = 100_000  # skip files over 100 KB
 TARGET_FILES = ["CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules", "mem0.md"]
 HASH_STORE = os.path.expanduser("~/.mem0/file_hashes.json")

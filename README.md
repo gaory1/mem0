@@ -1,3 +1,6 @@
+自托管版本，修复了Claude Code Plugin、mem0 CLI与自托管Server的兼容性问题。
+
+---
 <p align="center">
   <a href="https://github.com/mem0ai/mem0">
     <img src="docs/images/banner-sm.png" width="800px" alt="Mem0 - The Memory Layer for Personalized AI">

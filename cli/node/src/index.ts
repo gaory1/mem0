@@ -947,4 +947,7 @@ function surfaceNotice(): void {
 
 program.parseAsync().finally(() => {
 	surfaceNotice();
+	// Force exit: global fetch (undici) keeps the keep-alive socket to the
+	// server open ~4s, holding the event loop and delaying CLI exit.
+	process.exit(process.exitCode ?? 0);
 });
