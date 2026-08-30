@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import telemetry
@@ -159,6 +160,14 @@ set_session_factory(SessionLocal)
 initialize_state(DEFAULT_CONFIG)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Mounted sub-apps never receive the lifespan scope, so the MCP session
+    # manager has to be started from the host application.
+    async with mcp_lifespan(app):
+        yield
+
+
 app = FastAPI(
     title="Mem0 REST APIs",
     description=(
@@ -169,6 +178,7 @@ app = FastAPI(
     ),
     version="1.0.0",
     redirect_slashes=False,
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -188,7 +198,8 @@ app.include_router(entities_router.router)
 app.include_router(requests_router.router)
 
 # MCP (Model Context Protocol) endpoint — mounted at /mcp
-from routers.mcp import create_mcp_starlette_app
+from routers.mcp import create_mcp_starlette_app, mcp_lifespan
+
 app.mount("/mcp", create_mcp_starlette_app())
 
 

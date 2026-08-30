@@ -15,14 +15,17 @@ from collections import defaultdict
 from contextvars import ContextVar
 from typing import Any
 
+from contextlib import asynccontextmanager
+
 from fastapi import HTTPException
 from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Tool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from auth import AUTH_DISABLED, verify_auth
+from auth import AUTH_DISABLED, api_key_header, auth_scheme, verify_auth
 from server_state import get_memory_instance
 
 logger = logging.getLogger(__name__)
@@ -308,6 +311,26 @@ async def list_entities() -> CallToolResult:
 # Starlette app factory
 # ---------------------------------------------------------------------------
 
+# The raw MCP Starlette app, set by create_mcp_starlette_app(). Its lifespan
+# must be run by the host application — see mcp_lifespan.
+_mcp_asgi_app = None
+
+
+@asynccontextmanager
+async def mcp_lifespan(app):
+    """Run the MCP session manager within the host app's lifespan.
+
+    Starlette never forwards the lifespan scope to mounted sub-apps, so the
+    StreamableHTTPSessionManager inside the MCP app is never initialized on its
+    own and every request fails with "Task group is not initialized".
+    """
+    if _mcp_asgi_app is not None:
+        async with _mcp_asgi_app.router.lifespan_context(_mcp_asgi_app):
+            yield
+    else:
+        yield
+
+
 def create_mcp_starlette_app():
     """
     Build and return the Starlette ASGI app for the MCP server.
@@ -316,9 +339,17 @@ def create_mcp_starlette_app():
     (including streaming POST /mcp calls) authenticates before tool execution.
     The verified User is stored in a contextvar so tool handlers can read it.
     """
+    global _mcp_asgi_app
+
     mcp_app = mcp_server.streamable_http_app(
-        streamable_http_path="/mcp",
+        # main.py already mounts this app at /mcp; a nested "/mcp" here would
+        # double the prefix and expose the endpoint at /mcp/mcp.
+        streamable_http_path="/",
         json_response=False,
+        # The SDK auto-enables localhost-only Host-header checks when no host is
+        # given, which would 403 every client arriving via the LAN/docker
+        # address. Authentication is enforced by AuthMiddleware instead.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     class AuthMiddleware(BaseHTTPMiddleware):
@@ -327,7 +358,12 @@ def create_mcp_starlette_app():
                 user = None
             else:
                 try:
-                    user = await verify_auth(request)
+                    # Middleware runs outside FastAPI's dependency injection, so the
+                    # Depends() defaults on verify_auth are never resolved. Extract the
+                    # credentials here and pass them explicitly.
+                    credentials = await auth_scheme(request)
+                    x_api_key = await api_key_header(request)
+                    user = await verify_auth(request, credentials=credentials, x_api_key=x_api_key)
                 except HTTPException:
                     user = None
 
@@ -343,4 +379,5 @@ def create_mcp_starlette_app():
             finally:
                 _auth_user_var.reset(token)
 
+    _mcp_asgi_app = mcp_app
     return AuthMiddleware(mcp_app)
