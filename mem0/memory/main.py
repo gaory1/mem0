@@ -172,6 +172,33 @@ def _reject_top_level_entity_params(kwargs: Dict[str, Any], method_name: str) ->
         )
 
 
+def _filters_contain_entity_id(filters: Any) -> bool:
+    """
+    Check whether filters reference at least one entity ID, either at the top
+    level or nested inside AND/OR/NOT clauses.
+
+    Platform v3-style filters nest conditions, e.g. {"AND": [{"user_id": "u1"}]}.
+    The MCP server and REST clients send this shape, so checking only top-level
+    keys would wrongly reject it.
+
+    Args:
+        filters: The filter dict to inspect.
+
+    Returns:
+        bool: True if user_id, agent_id, or run_id appears at the top level or
+        within any (arbitrarily nested) logical clause.
+    """
+    if not isinstance(filters, dict):
+        return False
+    if any(key in filters for key in ("user_id", "agent_id", "run_id")):
+        return True
+    for operator in ("AND", "OR", "NOT"):
+        clauses = filters.get(operator)
+        if isinstance(clauses, list) and any(_filters_contain_entity_id(clause) for clause in clauses):
+            return True
+    return False
+
+
 def _validate_and_trim_entity_id(value: Optional[Any], name: str) -> Optional[str]:
     """
     Validates and normalizes an entity ID.
@@ -1299,8 +1326,8 @@ class Memory(MemoryBase):
                 effective_filters["run_id"], "run_id"
             )
 
-        # Validate filters contains at least one entity ID
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+        # Validate filters contains at least one entity ID (top level or nested in AND/OR/NOT)
+        if not _filters_contain_entity_id(effective_filters):
             raise ValueError(
                 "filters must contain at least one of: user_id, agent_id, run_id. "
                 "Example: filters={'user_id': 'u1'}"
@@ -1309,6 +1336,9 @@ class Memory(MemoryBase):
         limit = top_k
         fetch_limit = limit if show_expired else max(limit * 4, 60)
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
+        # Vector stores only understand flat filter keys; flatten nested clauses first
+        effective_filters = self._flatten_advanced_filters(effective_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(
@@ -1454,7 +1484,9 @@ class Memory(MemoryBase):
             effective_filters["run_id"] = _validate_and_trim_entity_id(
                 effective_filters["run_id"], "run_id"
             )
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+
+        # Validate filters contains at least one entity ID (top level or nested in AND/OR/NOT)
+        if not _filters_contain_entity_id(effective_filters):
             raise ValueError(
                 "filters must contain at least one of: user_id, agent_id, run_id. "
                 "Example: filters={'user_id': 'u1'}"
@@ -1464,15 +1496,7 @@ class Memory(MemoryBase):
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
-        if self._has_advanced_operators(effective_filters):
-            processed_filters = self._process_metadata_filters(effective_filters)
-            # Remove logical/operator keys that have been reprocessed
-            for logical_key in ("AND", "OR", "NOT"):
-                effective_filters.pop(logical_key, None)
-            for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
-                    effective_filters.pop(fk, None)
-            effective_filters.update(processed_filters)
+        effective_filters = self._flatten_advanced_filters(effective_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(
@@ -1601,16 +1625,16 @@ class Memory(MemoryBase):
     def _has_advanced_operators(self, filters: Dict[str, Any]) -> bool:
         """
         Check if filters contain advanced operators that need special processing.
-        
+
         Args:
             filters: Dictionary of filters to check
-            
+
         Returns:
             bool: True if advanced operators are detected
         """
         if not isinstance(filters, dict):
             return False
-            
+
         for key, value in filters.items():
             # Check for platform-style logical operators
             if key in ["AND", "OR", "NOT"]:
@@ -1624,6 +1648,26 @@ class Memory(MemoryBase):
             if value == "*":
                 return True
         return False
+
+    def _flatten_advanced_filters(self, effective_filters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Flatten AND/OR/NOT clauses and operator dicts into the flat key format
+        that vector stores consume. Mutates and returns effective_filters.
+
+        Entity IDs nested inside logical clauses are promoted to the top level
+        (AND semantics are preserved because flat keys are conjunctive).
+        """
+        if not self._has_advanced_operators(effective_filters):
+            return effective_filters
+        processed_filters = self._process_metadata_filters(effective_filters)
+        # Remove logical/operator keys that have been reprocessed
+        for logical_key in ("AND", "OR", "NOT"):
+            effective_filters.pop(logical_key, None)
+        for fk in list(effective_filters.keys()):
+            if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                effective_filters.pop(fk, None)
+        effective_filters.update(processed_filters)
+        return effective_filters
 
     def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
         # Guard against None threshold (backward compat)
@@ -2957,8 +3001,8 @@ class AsyncMemory(MemoryBase):
                 effective_filters["run_id"], "run_id"
             )
 
-        # Validate filters contains at least one entity ID
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+        # Validate filters contains at least one entity ID (top level or nested in AND/OR/NOT)
+        if not _filters_contain_entity_id(effective_filters):
             raise ValueError(
                 "filters must contain at least one of: user_id, agent_id, run_id. "
                 "Example: filters={'user_id': 'u1'}"
@@ -2967,6 +3011,9 @@ class AsyncMemory(MemoryBase):
         limit = top_k
         fetch_limit = limit if show_expired else max(limit * 4, 60)
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
+        # Vector stores only understand flat filter keys; flatten nested clauses first
+        effective_filters = self._flatten_advanced_filters(effective_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(
@@ -3115,8 +3162,8 @@ class AsyncMemory(MemoryBase):
                 effective_filters["run_id"], "run_id"
             )
 
-        # Validate filters contains at least one entity ID
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+        # Validate filters contains at least one entity ID (top level or nested in AND/OR/NOT)
+        if not _filters_contain_entity_id(effective_filters):
             raise ValueError(
                 "filters must contain at least one of: user_id, agent_id, run_id. "
                 "Example: filters={'user_id': 'u1'}"
@@ -3126,15 +3173,7 @@ class AsyncMemory(MemoryBase):
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
-        if self._has_advanced_operators(effective_filters):
-            processed_filters = self._process_metadata_filters(effective_filters)
-            # Remove logical/operator keys that have been reprocessed
-            for logical_key in ("AND", "OR", "NOT"):
-                effective_filters.pop(logical_key, None)
-            for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
-                    effective_filters.pop(fk, None)
-            effective_filters.update(processed_filters)
+        effective_filters = self._flatten_advanced_filters(effective_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(
@@ -3289,6 +3328,26 @@ class AsyncMemory(MemoryBase):
             if value == "*":
                 return True
         return False
+
+    def _flatten_advanced_filters(self, effective_filters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Flatten AND/OR/NOT clauses and operator dicts into the flat key format
+        that vector stores consume. Mutates and returns effective_filters.
+
+        Entity IDs nested inside logical clauses are promoted to the top level
+        (AND semantics are preserved because flat keys are conjunctive).
+        """
+        if not self._has_advanced_operators(effective_filters):
+            return effective_filters
+        processed_filters = self._process_metadata_filters(effective_filters)
+        # Remove logical/operator keys that have been reprocessed
+        for logical_key in ("AND", "OR", "NOT"):
+            effective_filters.pop(logical_key, None)
+        for fk in list(effective_filters.keys()):
+            if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                effective_filters.pop(fk, None)
+        effective_filters.update(processed_filters)
+        return effective_filters
 
     async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
         if threshold is None:

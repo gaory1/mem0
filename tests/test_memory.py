@@ -244,6 +244,76 @@ def test_search_explain_includes_score_details(
 @patch('mem0.utils.factory.VectorStoreFactory.create')
 @patch('mem0.utils.factory.LlmFactory.create')
 @patch('mem0.memory.storage.SQLiteManager')
+def test_search_accepts_entity_id_in_and_clause(
+    mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory
+):
+    """
+    Regression: entity IDs nested inside AND/OR/NOT clauses must pass validation.
+
+    Platform v3-style filters ({"AND": [{"user_id": "u1"}]}) are sent by the MCP
+    server and REST clients. The entity-ID check only inspected top-level keys
+    and rejected them, even though _process_metadata_filters already flattens
+    nested clauses.
+    """
+    mock_vector_store = MagicMock()
+    mock_vector_store.search.return_value = [
+        MockVectorMemory("mem_1", {"data": "content", "user_id": "u1"}, score=0.8)
+    ]
+    mock_vector_store.keyword_search.return_value = []
+    mock_vector_factory.return_value = mock_vector_store
+    mock_embedder_factory.return_value = MagicMock()
+    mock_llm_factory.return_value = MagicMock()
+    mock_sqlite.return_value = MagicMock()
+
+    from mem0.memory.main import Memory as MemoryClass
+    memory = MemoryClass(MemoryConfig())
+
+    result = memory.search("test query", filters={"AND": [{"user_id": "u1"}, {"app_id": "my-app"}]})
+
+    assert len(result["results"]) == 1
+    _, kwargs = mock_vector_store.search.call_args
+    assert kwargs["filters"]["user_id"] == "u1"
+    assert kwargs["filters"]["app_id"] == "my-app"
+    assert "AND" not in kwargs["filters"]
+
+
+@patch('mem0.utils.factory.EmbedderFactory.create')
+@patch('mem0.utils.factory.VectorStoreFactory.create')
+@patch('mem0.utils.factory.LlmFactory.create')
+@patch('mem0.memory.storage.SQLiteManager')
+def test_get_all_accepts_entity_id_in_and_clause(
+    mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory
+):
+    """
+    Regression: get_all must flatten nested AND clauses before hitting the vector store.
+
+    Vector stores only understand flattened filter keys; a raw {"AND": [...]}
+    dict would be treated as a literal "AND" payload key filter.
+    """
+    mock_vector_store = MagicMock()
+    mock_vector_store.list.return_value = [
+        MockVectorMemory("mem_1", {"data": "content", "user_id": "u1"})
+    ]
+    mock_vector_factory.return_value = mock_vector_store
+    mock_embedder_factory.return_value = MagicMock()
+    mock_llm_factory.return_value = MagicMock()
+    mock_sqlite.return_value = MagicMock()
+
+    from mem0.memory.main import Memory as MemoryClass
+    memory = MemoryClass(MemoryConfig())
+
+    result = memory.get_all(filters={"AND": [{"user_id": "u1"}]})
+
+    assert len(result["results"]) == 1
+    _, kwargs = mock_vector_store.list.call_args
+    assert kwargs["filters"]["user_id"] == "u1"
+    assert "AND" not in kwargs["filters"]
+
+
+@patch('mem0.utils.factory.EmbedderFactory.create')
+@patch('mem0.utils.factory.VectorStoreFactory.create')
+@patch('mem0.utils.factory.LlmFactory.create')
+@patch('mem0.memory.storage.SQLiteManager')
 def test_get_all_handles_nested_list_from_chroma(mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory):
     """
     Test that get_all() handles nested list return from Chroma/Milvus.
